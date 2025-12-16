@@ -29,7 +29,8 @@
     "cors": "^2.8.5",
     "node-llama-cpp": "^2.8.0",
     "winston": "^3.11.0",
-    "prom-client": "^15.1.0"
+    "prom-client": "^15.1.0",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.5",
@@ -37,6 +38,7 @@
     "@types/ws": "^8.5.10",
     "@types/compression": "^1.7.5",
     "@types/cors": "^2.8.17",
+    "@types/uuid": "^9.0.7",
     "typescript": "^5.3.3",
     "tsx": "^4.7.0",
     "eslint": "^8.56.0",
