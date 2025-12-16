@@ -17,6 +17,7 @@ export interface NodeCapabilities {
   ramAvailable: number;
   maxContextLength: number;
   supportedModels: string[];
+  supportsStreaming?: boolean;
 }
 
 export interface NodeMetrics {
@@ -81,4 +82,10 @@ export interface KVCacheEntry {
   nodeId: string;
   timestamp: number;
   ttl: number;
+}
+
+export interface InferenceResult {
+  text: string;
+  promptTokens: number;
+  completionTokens: number;
 }
