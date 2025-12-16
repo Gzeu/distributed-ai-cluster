@@ -1,6 +1,6 @@
 import crypto from 'crypto';
-import { promises as fs } from 'fs';
-import path from 'path';
+import Redis from 'ioredis';
+import { logger } from '../utils/logger';
 
 export interface ApiKey {
   key: string;
@@ -13,66 +13,62 @@ export interface ApiKey {
     requestsPerDay: number;
   };
   permissions: string[];
-  lastUsed?: number;
-  totalRequests: number;
+}
+
+export interface ApiKeyUsage {
+  requestCount: number;
+  lastUsed: number;
+  totalTokens: number;
 }
 
 export class ApiKeyManager {
-  private keys: Map<string, ApiKey> = new Map();
-  private keysFilePath: string;
+  private redis: Redis | null = null;
+  private useRedis: boolean;
+  private memoryStore: Map<string, ApiKey> = new Map();
+  private usageStore: Map<string, ApiKeyUsage> = new Map();
 
-  constructor(keysFilePath = './data/api-keys.json') {
-    this.keysFilePath = keysFilePath;
-  }
-
-  async initialize(): Promise<void> {
-    try {
-      // Create data directory if not exists
-      const dir = path.dirname(this.keysFilePath);
-      await fs.mkdir(dir, { recursive: true });
-
-      // Load existing keys
-      await this.loadKeys();
-      console.log(`✅ Loaded ${this.keys.size} API keys`);
-    } catch (error: any) {
-      console.warn('⚠️  No existing API keys found, starting fresh');
+  constructor() {
+    this.useRedis = process.env.REDIS_ENABLED === 'true';
+    
+    if (this.useRedis) {
+      this.initRedis();
+    } else {
+      logger.warn('Redis disabled, using in-memory API key storage');
     }
   }
 
-  async loadKeys(): Promise<void> {
+  private async initRedis() {
     try {
-      const data = await fs.readFile(this.keysFilePath, 'utf-8');
-      const keysArray: ApiKey[] = JSON.parse(data);
+      this.redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379');
       
-      this.keys.clear();
-      keysArray.forEach(key => {
-        this.keys.set(key.key, key);
+      this.redis.on('connect', () => {
+        logger.info('Connected to Redis for API key storage');
+      });
+
+      this.redis.on('error', (error) => {
+        logger.error('Redis connection error', { error: error.message });
       });
     } catch (error: any) {
-      if (error.code !== 'ENOENT') {
-        throw error;
-      }
+      logger.error('Failed to initialize Redis', { error: error.message });
+      this.useRedis = false;
     }
   }
 
-  async saveKeys(): Promise<void> {
-    const keysArray = Array.from(this.keys.values());
-    await fs.writeFile(
-      this.keysFilePath,
-      JSON.stringify(keysArray, null, 2),
-      'utf-8'
-    );
-  }
-
+  /**
+   * Generate a new API key
+   */
   generateKey(): string {
-    const prefix = 'aicl'; // AI Cluster
-    const random = crypto.randomBytes(24).toString('base64url');
-    return `${prefix}_${random}`;
+    const prefix = 'sk-ai';
+    const randomBytes = crypto.randomBytes(32).toString('hex');
+    return `${prefix}-${randomBytes}`;
   }
 
-  async createKey(
+  /**
+   * Create a new API key
+   */
+  async createApiKey(
     name: string,
-    userId: string,
+    userId: string = 'default',
     options: {
       expiresInDays?: number;
       requestsPerMinute?: number;
@@ -94,65 +90,180 @@ export class ApiKeyManager {
         requestsPerMinute: options.requestsPerMinute || 60,
         requestsPerDay: options.requestsPerDay || 10000,
       },
-      permissions: options.permissions || ['inference:read'],
-      totalRequests: 0,
+      permissions: options.permissions || ['inference'],
     };
 
-    this.keys.set(key, apiKey);
-    await this.saveKeys();
+    await this.storeApiKey(apiKey);
+    
+    logger.info('API key created', {
+      name,
+      userId,
+      key: `${key.substring(0, 10)}...`,
+    });
 
-    console.log(`🔑 Created API key: ${name} for user: ${userId}`);
     return apiKey;
   }
 
-  async validateKey(key: string): Promise<{ valid: boolean; apiKey?: ApiKey; reason?: string }> {
-    const apiKey = this.keys.get(key);
-
+  /**
+   * Validate API key
+   */
+  async validateApiKey(key: string): Promise<ApiKey | null> {
+    const apiKey = await this.getApiKey(key);
+    
     if (!apiKey) {
-      return { valid: false, reason: 'Invalid API key' };
+      logger.warn('Invalid API key attempt', { key: `${key.substring(0, 10)}...` });
+      return null;
     }
 
     // Check expiration
     if (apiKey.expiresAt && Date.now() > apiKey.expiresAt) {
-      return { valid: false, reason: 'API key expired' };
+      logger.warn('Expired API key used', { name: apiKey.name });
+      return null;
     }
 
-    return { valid: true, apiKey };
+    return apiKey;
   }
 
-  async recordUsage(key: string): Promise<void> {
-    const apiKey = this.keys.get(key);
-    if (!apiKey) return;
-
-    apiKey.lastUsed = Date.now();
-    apiKey.totalRequests++;
-
-    // Save periodically (every 10 requests)
-    if (apiKey.totalRequests % 10 === 0) {
-      await this.saveKeys();
-    }
-  }
-
-  async revokeKey(key: string): Promise<boolean> {
-    const deleted = this.keys.delete(key);
-    if (deleted) {
-      await this.saveKeys();
-      console.log(`🗑️  Revoked API key: ${key}`);
-    }
-    return deleted;
-  }
-
-  async listKeys(userId?: string): Promise<ApiKey[]> {
-    const allKeys = Array.from(this.keys.values());
+  /**
+   * Check rate limit
+   */
+  async checkRateLimit(key: string): Promise<{ allowed: boolean; remaining: number }> {
+    const usage = await this.getUsage(key);
+    const apiKey = await this.getApiKey(key);
     
-    if (userId) {
-      return allKeys.filter(k => k.userId === userId);
+    if (!apiKey) {
+      return { allowed: false, remaining: 0 };
     }
+
+    const now = Date.now();
+    const oneMinuteAgo = now - 60 * 1000;
+
+    // Check per-minute limit
+    const recentRequests = await this.getRequestsInWindow(key, oneMinuteAgo);
     
-    return allKeys;
+    if (recentRequests >= apiKey.rateLimit.requestsPerMinute) {
+      logger.warn('Rate limit exceeded', {
+        key: `${key.substring(0, 10)}...`,
+        limit: apiKey.rateLimit.requestsPerMinute,
+      });
+      return { 
+        allowed: false, 
+        remaining: 0 
+      };
+    }
+
+    return { 
+      allowed: true, 
+      remaining: apiKey.rateLimit.requestsPerMinute - recentRequests 
+    };
   }
 
-  getKeyInfo(key: string): ApiKey | undefined {
-    return this.keys.get(key);
+  /**
+   * Record API key usage
+   */
+  async recordUsage(key: string, tokens: number = 0): Promise<void> {
+    const usage = await this.getUsage(key);
+    
+    const updatedUsage: ApiKeyUsage = {
+      requestCount: usage.requestCount + 1,
+      lastUsed: Date.now(),
+      totalTokens: usage.totalTokens + tokens,
+    };
+
+    await this.storeUsage(key, updatedUsage);
+    await this.recordRequestTimestamp(key);
+  }
+
+  /**
+   * Get API key usage statistics
+   */
+  async getUsageStats(key: string): Promise<ApiKeyUsage | null> {
+    return await this.getUsage(key);
+  }
+
+  /**
+   * Revoke API key
+   */
+  async revokeApiKey(key: string): Promise<boolean> {
+    if (this.useRedis && this.redis) {
+      await this.redis.del(`apikey:${key}`);
+      await this.redis.del(`usage:${key}`);
+      await this.redis.del(`requests:${key}`);
+    } else {
+      this.memoryStore.delete(key);
+      this.usageStore.delete(key);
+    }
+
+    logger.info('API key revoked', { key: `${key.substring(0, 10)}...` });
+    return true;
+  }
+
+  // Private helper methods
+
+  private async storeApiKey(apiKey: ApiKey): Promise<void> {
+    if (this.useRedis && this.redis) {
+      await this.redis.set(
+        `apikey:${apiKey.key}`,
+        JSON.stringify(apiKey),
+        'EX',
+        apiKey.expiresAt ? Math.floor((apiKey.expiresAt - Date.now()) / 1000) : 365 * 24 * 60 * 60
+      );
+    } else {
+      this.memoryStore.set(apiKey.key, apiKey);
+    }
+  }
+
+  private async getApiKey(key: string): Promise<ApiKey | null> {
+    if (this.useRedis && this.redis) {
+      const data = await this.redis.get(`apikey:${key}`);
+      return data ? JSON.parse(data) : null;
+    } else {
+      return this.memoryStore.get(key) || null;
+    }
+  }
+
+  private async storeUsage(key: string, usage: ApiKeyUsage): Promise<void> {
+    if (this.useRedis && this.redis) {
+      await this.redis.set(
+        `usage:${key}`,
+        JSON.stringify(usage),
+        'EX',
+        30 * 24 * 60 * 60 // 30 days
+      );
+    } else {
+      this.usageStore.set(key, usage);
+    }
+  }
+
+  private async getUsage(key: string): Promise<ApiKeyUsage> {
+    if (this.useRedis && this.redis) {
+      const data = await this.redis.get(`usage:${key}`);
+      return data ? JSON.parse(data) : { requestCount: 0, lastUsed: 0, totalTokens: 0 };
+    } else {
+      return this.usageStore.get(key) || { requestCount: 0, lastUsed: 0, totalTokens: 0 };
+    }
+  }
+
+  private async recordRequestTimestamp(key: string): Promise<void> {
+    if (this.useRedis && this.redis) {
+      const now = Date.now();
+      await this.redis.zadd(`requests:${key}`, now, `${now}`);
+      // Clean up old timestamps (keep only last hour)
+      await this.redis.zremrangebyscore(`requests:${key}`, 0, now - 60 * 60 * 1000);
+      await this.redis.expire(`requests:${key}`, 3600);
+    }
+  }
+
+  private async getRequestsInWindow(key: string, since: number): Promise<number> {
+    if (this.useRedis && this.redis) {
+      return await this.redis.zcount(`requests:${key}`, since, '+inf');
+    } else {
+      // Simplified in-memory implementation
+      const usage = this.usageStore.get(key);
+      return usage && usage.lastUsed > since ? 1 : 0;
+    }
   }
 }
+
+// Singleton instance
+export const apiKeyManager = new ApiKeyManager();
