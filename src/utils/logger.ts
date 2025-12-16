@@ -1,127 +1,107 @@
 import winston from 'winston';
-import path from 'path';
-import fs from 'fs';
+import { Request, Response, NextFunction } from 'express';
 
-const logDir = process.env.LOG_DIR || './logs';
-const logLevel = process.env.LOG_LEVEL || 'info';
+const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
 
-// Ensure log directory exists
-if (!fs.existsSync(logDir)) {
-  fs.mkdirSync(logDir, { recursive: true });
-}
-
-// Custom format for console output
-const consoleFormat = winston.format.combine(
+// Custom format for structured logging
+const logFormat = winston.format.combine(
   winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-  winston.format.colorize(),
-  winston.format.printf(({ timestamp, level, message, requestId, ...meta }) => {
-    let msg = `${timestamp} [${level}]`;
-    
-    if (requestId) {
-      msg += ` [${requestId}]`;
-    }
-    
-    msg += `: ${message}`;
-    
-    const metaKeys = Object.keys(meta).filter(k => k !== 'service' && k !== 'timestamp');
-    if (metaKeys.length > 0) {
-      const cleanMeta: any = {};
-      metaKeys.forEach(k => cleanMeta[k] = meta[k]);
-      msg += ` ${JSON.stringify(cleanMeta)}`;
-    }
-    
-    return msg;
-  })
-);
-
-// JSON format for file output
-const fileFormat = winston.format.combine(
-  winston.format.timestamp(),
   winston.format.errors({ stack: true }),
+  winston.format.splat(),
   winston.format.json()
 );
 
-// Create logger
+// Console format for development
+const consoleFormat = winston.format.combine(
+  winston.format.colorize(),
+  winston.format.timestamp({ format: 'HH:mm:ss' }),
+  winston.format.printf(({ timestamp, level, message, ...meta }) => {
+    let metaStr = '';
+    if (Object.keys(meta).length > 0) {
+      metaStr = JSON.stringify(meta, null, 2);
+    }
+    return `${timestamp} [${level}]: ${message} ${metaStr}`;
+  })
+);
+
+// Create logger instance
 export const logger = winston.createLogger({
-  level: logLevel,
-  format: fileFormat,
-  defaultMeta: { service: 'ai-cluster' },
+  level: LOG_LEVEL,
+  format: logFormat,
+  defaultMeta: {
+    service: process.env.SERVICE_NAME || 'ai-cluster',
+    nodeType: process.env.NODE_TYPE || 'unknown',
+  },
   transports: [
-    // Console transport
+    // Console output
     new winston.transports.Console({
-      format: consoleFormat,
+      format: process.env.NODE_ENV === 'production' ? logFormat : consoleFormat,
     }),
-    
-    // Error log file
+    // File output for errors
     new winston.transports.File({
-      filename: path.join(logDir, 'error.log'),
+      filename: 'logs/error.log',
       level: 'error',
-      maxsize: 10 * 1024 * 1024, // 10MB
+      maxsize: 10485760, // 10MB
       maxFiles: 5,
     }),
-    
-    // Combined log file
+    // File output for all logs
     new winston.transports.File({
-      filename: path.join(logDir, 'combined.log'),
-      maxsize: 10 * 1024 * 1024, // 10MB
-      maxFiles: 10,
+      filename: 'logs/combined.log',
+      maxsize: 10485760, // 10MB
+      maxFiles: 5,
     }),
   ],
 });
 
-// Create child logger with context
-export function createContextLogger(context: { requestId?: string; userId?: string; nodeId?: string }) {
-  return logger.child(context);
-}
-
-// Request logger middleware
+// Request logging middleware
 export function createRequestLogger() {
-  return (req: any, res: any, next: any) => {
-    const requestId = req.headers['x-request-id'] || `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    req.requestId = requestId;
-    req.logger = createContextLogger({ requestId, userId: req.userId });
-    
+  return (req: Request, res: Response, next: NextFunction) => {
+    const requestId = `req_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const startTime = Date.now();
-    
+
+    // Attach request ID to request object
+    (req as any).requestId = requestId;
+
     // Log request
-    req.logger.info('Incoming request', {
+    logger.info('Incoming request', {
+      requestId,
       method: req.method,
       path: req.path,
-      query: req.query,
       ip: req.ip,
+      userAgent: req.get('user-agent'),
     });
-    
+
     // Log response
     res.on('finish', () => {
       const duration = Date.now() - startTime;
-      req.logger.info('Request completed', {
+      logger.info('Request completed', {
+        requestId,
         method: req.method,
         path: req.path,
         statusCode: res.statusCode,
         duration,
       });
     });
-    
+
     next();
   };
 }
 
-// Error logger
-export function logError(error: Error, context?: any) {
-  logger.error('Error occurred', {
-    message: error.message,
-    stack: error.stack,
-    ...context,
-  });
-}
-
-// Performance logger
-export function logPerformance(operation: string, duration: number, metadata?: any) {
-  logger.info('Performance metric', {
+// Performance logging helper
+export function logPerformance(operation: string, startTime: number, metadata?: any) {
+  const duration = Date.now() - startTime;
+  logger.info(`Performance: ${operation}`, {
     operation,
     duration,
     ...metadata,
   });
 }
 
-export default logger;
+// Error logging helper
+export function logError(error: Error, context?: any) {
+  logger.error('Error occurred', {
+    error: error.message,
+    stack: error.stack,
+    ...context,
+  });
+}

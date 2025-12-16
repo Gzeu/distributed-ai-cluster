@@ -29,7 +29,8 @@
     "cors": "^2.8.5",
     "node-llama-cpp": "^2.8.0",
     "winston": "^3.11.0",
-    "prom-client": "^15.1.0"
+    "prom-client": "^15.1.0",
+    "express-prom-bundle": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.5",

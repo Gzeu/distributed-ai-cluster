@@ -1,11 +1,14 @@
-import { register, Counter, Histogram, Gauge, collectDefaultMetrics } from 'prom-client';
+import { Registry, Counter, Histogram, Gauge, collectDefaultMetrics } from 'prom-client';
 
-// Collect default metrics (CPU, memory, etc.)
+// Create a Registry to register the metrics
+export const register = new Registry();
+
+// Add default metrics (CPU, memory, etc.)
 collectDefaultMetrics({ register });
 
 // Custom metrics
 
-// Request metrics
+// Request counter
 export const httpRequestsTotal = new Counter({
   name: 'http_requests_total',
   help: 'Total number of HTTP requests',
@@ -13,11 +16,12 @@ export const httpRequestsTotal = new Counter({
   registers: [register],
 });
 
+// Request duration histogram
 export const httpRequestDuration = new Histogram({
   name: 'http_request_duration_seconds',
   help: 'Duration of HTTP requests in seconds',
   labelNames: ['method', 'path', 'status'],
-  buckets: [0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
   registers: [register],
 });
 
@@ -29,6 +33,14 @@ export const inferenceRequestsTotal = new Counter({
   registers: [register],
 });
 
+export const inferenceRequestDuration = new Histogram({
+  name: 'inference_request_duration_seconds',
+  help: 'Duration of inference requests in seconds',
+  labelNames: ['model', 'status'],
+  buckets: [0.5, 1, 2, 5, 10, 20, 30, 60, 120],
+  registers: [register],
+});
+
 export const inferenceTokensGenerated = new Counter({
   name: 'inference_tokens_generated_total',
   help: 'Total number of tokens generated',
@@ -36,17 +48,9 @@ export const inferenceTokensGenerated = new Counter({
   registers: [register],
 });
 
-export const inferenceDuration = new Histogram({
-  name: 'inference_duration_seconds',
-  help: 'Duration of inference requests in seconds',
-  labelNames: ['model'],
-  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
-  registers: [register],
-});
-
 export const inferenceTokensPerSecond = new Gauge({
   name: 'inference_tokens_per_second',
-  help: 'Current tokens per second generation rate',
+  help: 'Tokens generated per second',
   labelNames: ['model'],
   registers: [register],
 });
@@ -61,7 +65,7 @@ export const clusterNodesActive = new Gauge({
 
 export const clusterNodeRequestsActive = new Gauge({
   name: 'cluster_node_requests_active',
-  help: 'Number of active requests per node',
+  help: 'Number of active requests on a node',
   labelNames: ['node_id'],
   registers: [register],
 });
@@ -69,43 +73,18 @@ export const clusterNodeRequestsActive = new Gauge({
 // Model metrics
 export const modelLoadTime = new Histogram({
   name: 'model_load_time_seconds',
-  help: 'Time taken to load model',
+  help: 'Time to load model in seconds',
   labelNames: ['model'],
-  buckets: [1, 5, 10, 30, 60, 120],
+  buckets: [1, 5, 10, 20, 30, 60, 120],
   registers: [register],
 });
 
 export const modelMemoryUsage = new Gauge({
   name: 'model_memory_usage_bytes',
-  help: 'Memory used by loaded model',
+  help: 'Memory usage of loaded model in bytes',
   labelNames: ['model'],
   registers: [register],
 });
-
-// Rate limit metrics
-export const rateLimitExceeded = new Counter({
-  name: 'rate_limit_exceeded_total',
-  help: 'Total number of rate limit exceeded events',
-  labelNames: ['api_key_preview', 'limit_type'],
-  registers: [register],
-});
-
-// Authentication metrics
-export const authAttempts = new Counter({
-  name: 'auth_attempts_total',
-  help: 'Total number of authentication attempts',
-  labelNames: ['status'],
-  registers: [register],
-});
-
-// Export registry for /metrics endpoint
-export { register };
-
-// Helper function to record HTTP request
-export function recordHttpRequest(method: string, path: string, status: number, duration: number) {
-  httpRequestsTotal.inc({ method, path, status });
-  httpRequestDuration.observe({ method, path, status }, duration);
-}
 
 // Helper function to record inference
 export function recordInference(
@@ -116,9 +95,9 @@ export function recordInference(
   tokensPerSecond: number
 ) {
   inferenceRequestsTotal.inc({ model, status });
-  inferenceDuration.observe({ model }, duration);
+  inferenceRequestDuration.observe({ model, status }, duration);
   
-  if (status === 'success') {
+  if (status === 'success' && tokens > 0) {
     inferenceTokensGenerated.inc({ model }, tokens);
     inferenceTokensPerSecond.set({ model }, tokensPerSecond);
   }
