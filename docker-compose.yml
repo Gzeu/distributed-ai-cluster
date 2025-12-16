@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ai-cluster-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - ai-cluster
+
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    container_name: ai-cluster-controller
+    ports:
+      - "8080:8080"
+      - "9000:9000"
+    environment:
+      - CONTROLLER_PORT=8080
+      - CONTROLLER_HOST=0.0.0.0
+      - REDIS_URL=redis://redis:6379
+      - REDIS_ENABLED=true
+      - P2P_ENABLED=true
+      - P2P_PORT=9000
+      - STRATEGY=least_loaded
+      - HEALTH_CHECK_INTERVAL=5000
+      - LOG_LEVEL=info
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - ai-cluster
+    restart: unless-stopped
+
+  worker-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: ai-cluster-worker-1
+    ports:
+      - "8081:8081"
+    environment:
+      - WORKER_PORT=8081
+      - WORKER_HOST=0.0.0.0
+      - CONTROLLER_URL=http://controller:8080
+      - MODEL_PATH=/app/models/model.gguf
+      - CONTEXT_LENGTH=2048
+      - GPU_LAYERS=0
+      - REDIS_URL=redis://redis:6379
+      - REDIS_ENABLED=true
+      - P2P_ENABLED=true
+    volumes:
+      - ./models:/app/models:ro
+    depends_on:
+      - controller
+    networks:
+      - ai-cluster
+    restart: unless-stopped
+
+  worker-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: ai-cluster-worker-2
+    ports:
+      - "8082:8081"
+    environment:
+      - WORKER_PORT=8081
+      - WORKER_HOST=0.0.0.0
+      - CONTROLLER_URL=http://controller:8080
+      - MODEL_PATH=/app/models/model.gguf
+      - CONTEXT_LENGTH=2048
+      - GPU_LAYERS=0
+      - REDIS_URL=redis://redis:6379
+      - REDIS_ENABLED=true
+    volumes:
+      - ./models:/app/models:ro
+    depends_on:
+      - controller
+    networks:
+      - ai-cluster
+    restart: unless-stopped
+
+  # Optional: Web Dashboard
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: ai-cluster-dashboard
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080
+      - NODE_ENV=production
+    depends_on:
+      - controller
+    networks:
+      - ai-cluster
+    restart: unless-stopped
+
+networks:
+  ai-cluster:
+    driver: bridge
+
+volumes:
+  redis-data:

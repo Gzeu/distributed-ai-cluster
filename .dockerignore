@@ -1,0 +1,14 @@
+node_modules
+npm-debug.log
+dist
+.git
+.github
+.env
+.env.local
+README.md
+docs
+examples
+*.md
+.vscode
+.idea
+models/*.gguf

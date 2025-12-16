@@ -1,0 +1,49 @@
+# Multi-stage build for Worker Node
+FROM node:18-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
+
+# Install dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Copy source code
+COPY src ./src
+
+# Build TypeScript
+RUN npm install -g typescript && tsc
+
+# Production stage
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Install system dependencies for llama.cpp
+RUN apk add --no-cache \
+    dumb-init \
+    build-base \
+    cmake \
+    python3
+
+# Copy built application
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package*.json ./
+
+# Create directories for models
+RUN mkdir -p /app/models && \
+    addgroup -g 1001 -S nodejs && \
+    adduser -S nodejs -u 1001 && \
+    chown -R nodejs:nodejs /app
+
+USER nodejs
+
+EXPOSE 8081
+
+ENV NODE_ENV=production
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["node", "dist/worker/server.js"]
