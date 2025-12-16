@@ -1,230 +1,158 @@
 import crypto from 'crypto';
-import fs from 'fs';
+import { promises as fs } from 'fs';
 import path from 'path';
 
 export interface ApiKey {
   key: string;
   name: string;
-  userId?: string;
+  userId: string;
   createdAt: number;
-  lastUsedAt?: number;
   expiresAt?: number;
   rateLimit: {
     requestsPerMinute: number;
     requestsPerDay: number;
   };
   permissions: string[];
-  enabled: boolean;
-}
-
-export interface ApiKeyUsage {
-  requests: number;
-  tokens: number;
-  lastReset: number;
+  lastUsed?: number;
+  totalRequests: number;
 }
 
 export class ApiKeyManager {
   private keys: Map<string, ApiKey> = new Map();
-  private usage: Map<string, ApiKeyUsage> = new Map();
   private keysFilePath: string;
 
   constructor(keysFilePath = './data/api-keys.json') {
     this.keysFilePath = keysFilePath;
-    this.loadKeys();
   }
 
-  private loadKeys(): void {
+  async initialize(): Promise<void> {
     try {
-      if (fs.existsSync(this.keysFilePath)) {
-        const data = fs.readFileSync(this.keysFilePath, 'utf-8');
-        const keysArray: ApiKey[] = JSON.parse(data);
-        keysArray.forEach(key => this.keys.set(key.key, key));
-        console.log(`✅ Loaded ${keysArray.length} API keys`);
-      } else {
-        // Create default admin key on first run
-        this.createDefaultKey();
-      }
-    } catch (error: any) {
-      console.error('❌ Failed to load API keys:', error.message);
-    }
-  }
-
-  private saveKeys(): void {
-    try {
+      // Create data directory if not exists
       const dir = path.dirname(this.keysFilePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
+      await fs.mkdir(dir, { recursive: true });
 
-      const keysArray = Array.from(this.keys.values());
-      fs.writeFileSync(this.keysFilePath, JSON.stringify(keysArray, null, 2));
+      // Load existing keys
+      await this.loadKeys();
+      console.log(`✅ Loaded ${this.keys.size} API keys`);
     } catch (error: any) {
-      console.error('❌ Failed to save API keys:', error.message);
+      console.warn('⚠️  No existing API keys found, starting fresh');
     }
   }
 
-  private createDefaultKey(): void {
-    const defaultKey = this.generateKey({
-      name: 'Default Admin Key',
-      rateLimit: {
-        requestsPerMinute: 60,
-        requestsPerDay: 10000,
-      },
-      permissions: ['*'],
-    });
-
-    console.log('🔑 Created default API key:');
-    console.log(`   Key: ${defaultKey.key}`);
-    console.log('   ⚠️  Save this key securely!');
+  async loadKeys(): Promise<void> {
+    try {
+      const data = await fs.readFile(this.keysFilePath, 'utf-8');
+      const keysArray: ApiKey[] = JSON.parse(data);
+      
+      this.keys.clear();
+      keysArray.forEach(key => {
+        this.keys.set(key.key, key);
+      });
+    } catch (error: any) {
+      if (error.code !== 'ENOENT') {
+        throw error;
+      }
+    }
   }
 
-  generateKey(options: {
-    name: string;
-    userId?: string;
-    expiresIn?: number; // days
-    rateLimit?: {
-      requestsPerMinute: number;
-      requestsPerDay: number;
-    };
-    permissions?: string[];
-  }): ApiKey {
-    const key = 'sk-' + crypto.randomBytes(32).toString('hex');
+  async saveKeys(): Promise<void> {
+    const keysArray = Array.from(this.keys.values());
+    await fs.writeFile(
+      this.keysFilePath,
+      JSON.stringify(keysArray, null, 2),
+      'utf-8'
+    );
+  }
+
+  generateKey(): string {
+    const prefix = 'aicl'; // AI Cluster
+    const random = crypto.randomBytes(24).toString('base64url');
+    return `${prefix}_${random}`;
+  }
+
+  async createKey(
+    name: string,
+    userId: string,
+    options: {
+      expiresInDays?: number;
+      requestsPerMinute?: number;
+      requestsPerDay?: number;
+      permissions?: string[];
+    } = {}
+  ): Promise<ApiKey> {
+    const key = this.generateKey();
     
     const apiKey: ApiKey = {
       key,
-      name: options.name,
-      userId: options.userId,
+      name,
+      userId,
       createdAt: Date.now(),
-      expiresAt: options.expiresIn 
-        ? Date.now() + options.expiresIn * 24 * 60 * 60 * 1000
+      expiresAt: options.expiresInDays 
+        ? Date.now() + (options.expiresInDays * 24 * 60 * 60 * 1000)
         : undefined,
-      rateLimit: options.rateLimit || {
-        requestsPerMinute: 20,
-        requestsPerDay: 1000,
+      rateLimit: {
+        requestsPerMinute: options.requestsPerMinute || 60,
+        requestsPerDay: options.requestsPerDay || 10000,
       },
-      permissions: options.permissions || ['inference'],
-      enabled: true,
+      permissions: options.permissions || ['inference:read'],
+      totalRequests: 0,
     };
 
     this.keys.set(key, apiKey);
-    this.saveKeys();
+    await this.saveKeys();
 
+    console.log(`🔑 Created API key: ${name} for user: ${userId}`);
     return apiKey;
   }
 
-  validateKey(key: string): { valid: boolean; reason?: string; apiKey?: ApiKey } {
+  async validateKey(key: string): Promise<{ valid: boolean; apiKey?: ApiKey; reason?: string }> {
     const apiKey = this.keys.get(key);
 
     if (!apiKey) {
       return { valid: false, reason: 'Invalid API key' };
     }
 
-    if (!apiKey.enabled) {
-      return { valid: false, reason: 'API key disabled' };
-    }
-
-    if (apiKey.expiresAt && apiKey.expiresAt < Date.now()) {
+    // Check expiration
+    if (apiKey.expiresAt && Date.now() > apiKey.expiresAt) {
       return { valid: false, reason: 'API key expired' };
     }
 
     return { valid: true, apiKey };
   }
 
-  checkRateLimit(key: string): { allowed: boolean; reason?: string } {
-    const apiKey = this.keys.get(key);
-    if (!apiKey) {
-      return { allowed: false, reason: 'Invalid API key' };
-    }
-
-    const usage = this.usage.get(key) || {
-      requests: 0,
-      tokens: 0,
-      lastReset: Date.now(),
-    };
-
-    const now = Date.now();
-    const minuteMs = 60 * 1000;
-    const dayMs = 24 * 60 * 60 * 1000;
-
-    // Reset counters if needed
-    if (now - usage.lastReset > dayMs) {
-      usage.requests = 0;
-      usage.tokens = 0;
-      usage.lastReset = now;
-    }
-
-    // Check per-minute limit
-    const requestsLastMinute = this.getRequestsInWindow(key, minuteMs);
-    if (requestsLastMinute >= apiKey.rateLimit.requestsPerMinute) {
-      return { 
-        allowed: false, 
-        reason: `Rate limit exceeded: ${apiKey.rateLimit.requestsPerMinute} requests/minute` 
-      };
-    }
-
-    // Check per-day limit
-    if (usage.requests >= apiKey.rateLimit.requestsPerDay) {
-      return { 
-        allowed: false, 
-        reason: `Daily limit exceeded: ${apiKey.rateLimit.requestsPerDay} requests/day` 
-      };
-    }
-
-    return { allowed: true };
-  }
-
-  private requestTimestamps: Map<string, number[]> = new Map();
-
-  private getRequestsInWindow(key: string, windowMs: number): number {
-    const timestamps = this.requestTimestamps.get(key) || [];
-    const now = Date.now();
-    const validTimestamps = timestamps.filter(t => now - t < windowMs);
-    this.requestTimestamps.set(key, validTimestamps);
-    return validTimestamps.length;
-  }
-
-  recordRequest(key: string, tokens = 0): void {
+  async recordUsage(key: string): Promise<void> {
     const apiKey = this.keys.get(key);
     if (!apiKey) return;
 
-    // Update last used
-    apiKey.lastUsedAt = Date.now();
-    this.saveKeys();
+    apiKey.lastUsed = Date.now();
+    apiKey.totalRequests++;
 
-    // Update usage
-    const usage = this.usage.get(key) || {
-      requests: 0,
-      tokens: 0,
-      lastReset: Date.now(),
-    };
-
-    usage.requests++;
-    usage.tokens += tokens;
-    this.usage.set(key, usage);
-
-    // Record timestamp for rate limiting
-    const timestamps = this.requestTimestamps.get(key) || [];
-    timestamps.push(Date.now());
-    this.requestTimestamps.set(key, timestamps);
+    // Save periodically (every 10 requests)
+    if (apiKey.totalRequests % 10 === 0) {
+      await this.saveKeys();
+    }
   }
 
-  revokeKey(key: string): boolean {
-    const apiKey = this.keys.get(key);
-    if (!apiKey) return false;
-
-    apiKey.enabled = false;
-    this.saveKeys();
-    return true;
+  async revokeKey(key: string): Promise<boolean> {
+    const deleted = this.keys.delete(key);
+    if (deleted) {
+      await this.saveKeys();
+      console.log(`🗑️  Revoked API key: ${key}`);
+    }
+    return deleted;
   }
 
-  listKeys(): ApiKey[] {
-    return Array.from(this.keys.values()).map(key => ({
-      ...key,
-      key: key.key.substring(0, 12) + '...' // Mask key
-    }));
+  async listKeys(userId?: string): Promise<ApiKey[]> {
+    const allKeys = Array.from(this.keys.values());
+    
+    if (userId) {
+      return allKeys.filter(k => k.userId === userId);
+    }
+    
+    return allKeys;
   }
 
-  getUsage(key: string): ApiKeyUsage | undefined {
-    return this.usage.get(key);
+  getKeyInfo(key: string): ApiKey | undefined {
+    return this.keys.get(key);
   }
 }

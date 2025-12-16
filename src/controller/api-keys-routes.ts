@@ -1,84 +1,82 @@
 import { Router, Request, Response } from 'express';
 import { ApiKeyManager } from '../auth/api-key-manager';
-import { AuthMiddleware } from '../auth/auth-middleware';
+import { AuthenticatedRequest } from '../auth/auth-middleware';
 
-export function createApiKeysRouter(apiKeyManager: ApiKeyManager, authMiddleware: AuthMiddleware): Router {
+export function createApiKeysRouter(apiKeyManager: ApiKeyManager): Router {
   const router = Router();
 
-  // Generate new API key (requires existing valid key with admin permission)
-  router.post('/generate', authMiddleware.authenticate, (req: Request, res: Response) => {
+  // Create new API key
+  router.post('/keys', async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const { name, expiresIn, rateLimit, permissions } = req.body;
+      const { name, expiresInDays, requestsPerMinute, requestsPerDay, permissions } = req.body;
 
       if (!name) {
-        res.status(400).json({ error: 'Name is required' });
-        return;
+        return res.status(400).json({ error: 'Name is required' });
       }
 
-      const newKey = apiKeyManager.generateKey({
-        name,
-        expiresIn,
-        rateLimit,
+      const userId = req.userId || 'anonymous';
+
+      const apiKey = await apiKeyManager.createKey(name, userId, {
+        expiresInDays,
+        requestsPerMinute,
+        requestsPerDay,
         permissions,
       });
 
       res.json({
-        key: newKey.key,
-        name: newKey.name,
-        createdAt: newKey.createdAt,
-        expiresAt: newKey.expiresAt,
-        rateLimit: newKey.rateLimit,
-        permissions: newKey.permissions,
-        message: '⚠️ Save this key securely. It will not be shown again.',
+        success: true,
+        apiKey: {
+          key: apiKey.key,
+          name: apiKey.name,
+          createdAt: apiKey.createdAt,
+          expiresAt: apiKey.expiresAt,
+          rateLimit: apiKey.rateLimit,
+        },
+        warning: 'Store this key securely. It will not be shown again.',
       });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
-  // List all API keys (masked)
-  router.get('/list', authMiddleware.authenticate, (req: Request, res: Response) => {
+  // List API keys (without revealing full keys)
+  router.get('/keys', async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const keys = apiKeyManager.listKeys();
-      res.json({ keys });
+      const userId = req.userId;
+      const keys = await apiKeyManager.listKeys(userId);
+
+      const sanitizedKeys = keys.map(key => ({
+        name: key.name,
+        keyPreview: key.key.substring(0, 12) + '...',
+        createdAt: key.createdAt,
+        expiresAt: key.expiresAt,
+        lastUsed: key.lastUsed,
+        totalRequests: key.totalRequests,
+        rateLimit: key.rateLimit,
+      }));
+
+      res.json({ keys: sanitizedKeys });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
   // Revoke API key
-  router.post('/revoke', authMiddleware.authenticate, (req: Request, res: Response) => {
+  router.delete('/keys/:keyPreview', async (req: AuthenticatedRequest, res: Response) => {
     try {
-      const { key } = req.body;
+      const { keyPreview } = req.params;
+      const userId = req.userId;
+
+      // Find full key from preview
+      const keys = await apiKeyManager.listKeys(userId);
+      const key = keys.find(k => k.key.startsWith(keyPreview.replace('...', '')));
 
       if (!key) {
-        res.status(400).json({ error: 'Key is required' });
-        return;
+        return res.status(404).json({ error: 'API key not found' });
       }
 
-      const revoked = apiKeyManager.revokeKey(key);
-      
-      if (revoked) {
-        res.json({ message: 'API key revoked successfully' });
-      } else {
-        res.status(404).json({ error: 'API key not found' });
-      }
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Get usage stats
-  router.get('/usage/:key', authMiddleware.authenticate, (req: Request, res: Response) => {
-    try {
-      const { key } = req.params;
-      const usage = apiKeyManager.getUsage(key);
-
-      if (usage) {
-        res.json({ usage });
-      } else {
-        res.status(404).json({ error: 'No usage data found' });
-      }
+      await apiKeyManager.revokeKey(key.key);
+      res.json({ success: true, message: 'API key revoked' });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

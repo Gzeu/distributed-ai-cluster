@@ -1,61 +1,95 @@
-export interface RateLimitInfo {
-  key: string;
-  requests: number;
+interface RateLimitRecord {
+  count: number;
   resetAt: number;
 }
 
 export class RateLimiter {
-  private limits: Map<string, RateLimitInfo> = new Map();
-  private cleanupInterval: NodeJS.Timeout;
+  private minuteLimits: Map<string, RateLimitRecord> = new Map();
+  private dayLimits: Map<string, RateLimitRecord> = new Map();
 
-  constructor() {
-    // Cleanup expired entries every minute
-    this.cleanupInterval = setInterval(() => this.cleanup(), 60000);
-  }
-
-  checkLimit(key: string, maxRequests: number): { allowed: boolean; remaining: number; resetAt: number } {
+  checkLimit(
+    key: string,
+    requestsPerMinute: number,
+    requestsPerDay: number
+  ): { allowed: boolean; reason?: string; retryAfter?: number } {
     const now = Date.now();
-    const windowStart = now - 60000; // 1 minute window
 
-    let info = this.limits.get(key);
+    // Check minute limit
+    const minuteKey = `${key}:minute`;
+    let minuteRecord = this.minuteLimits.get(minuteKey);
 
-    if (!info || info.resetAt < now) {
-      // New window
-      info = {
-        key,
-        requests: 0,
-        resetAt: now + 60000,
+    if (!minuteRecord || now > minuteRecord.resetAt) {
+      minuteRecord = {
+        count: 0,
+        resetAt: now + 60 * 1000, // 1 minute
       };
-      this.limits.set(key, info);
+      this.minuteLimits.set(minuteKey, minuteRecord);
     }
 
-    if (info.requests >= maxRequests) {
+    if (minuteRecord.count >= requestsPerMinute) {
       return {
         allowed: false,
-        remaining: 0,
-        resetAt: info.resetAt,
+        reason: 'Rate limit exceeded (per minute)',
+        retryAfter: Math.ceil((minuteRecord.resetAt - now) / 1000),
       };
     }
 
-    info.requests++;
+    // Check day limit
+    const dayKey = `${key}:day`;
+    let dayRecord = this.dayLimits.get(dayKey);
 
-    return {
-      allowed: true,
-      remaining: maxRequests - info.requests,
-      resetAt: info.resetAt,
-    };
+    if (!dayRecord || now > dayRecord.resetAt) {
+      dayRecord = {
+        count: 0,
+        resetAt: now + 24 * 60 * 60 * 1000, // 24 hours
+      };
+      this.dayLimits.set(dayKey, dayRecord);
+    }
+
+    if (dayRecord.count >= requestsPerDay) {
+      return {
+        allowed: false,
+        reason: 'Rate limit exceeded (per day)',
+        retryAfter: Math.ceil((dayRecord.resetAt - now) / 1000),
+      };
+    }
+
+    // Increment counters
+    minuteRecord.count++;
+    dayRecord.count++;
+
+    return { allowed: true };
   }
 
-  private cleanup(): void {
+  cleanup(): void {
     const now = Date.now();
-    for (const [key, info] of this.limits.entries()) {
-      if (info.resetAt < now) {
-        this.limits.delete(key);
+
+    // Clean expired minute limits
+    for (const [key, record] of this.minuteLimits.entries()) {
+      if (now > record.resetAt) {
+        this.minuteLimits.delete(key);
+      }
+    }
+
+    // Clean expired day limits
+    for (const [key, record] of this.dayLimits.entries()) {
+      if (now > record.resetAt) {
+        this.dayLimits.delete(key);
       }
     }
   }
 
-  destroy(): void {
-    clearInterval(this.cleanupInterval);
+  getRemainingRequests(
+    key: string,
+    requestsPerMinute: number,
+    requestsPerDay: number
+  ): { minute: number; day: number } {
+    const minuteRecord = this.minuteLimits.get(`${key}:minute`);
+    const dayRecord = this.dayLimits.get(`${key}:day`);
+
+    return {
+      minute: requestsPerMinute - (minuteRecord?.count || 0),
+      day: requestsPerDay - (dayRecord?.count || 0),
+    };
   }
 }
