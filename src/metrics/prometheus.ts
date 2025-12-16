@@ -1,178 +1,125 @@
-import { Registry, Counter, Histogram, Gauge } from 'prom-client';
-import { Request, Response } from 'express';
+import { register, Counter, Histogram, Gauge, collectDefaultMetrics } from 'prom-client';
 
-export class MetricsCollector {
-  public registry: Registry;
+// Collect default metrics (CPU, memory, etc.)
+collectDefaultMetrics({ register });
 
-  // Counters
-  public requestsTotal: Counter;
-  public inferenceRequestsTotal: Counter;
-  public errorsTotal: Counter;
-  public tokensGenerated: Counter;
+// Custom metrics
 
-  // Histograms
-  public requestDuration: Histogram;
-  public inferenceDuration: Histogram;
-  public tokenGenerationTime: Histogram;
+// Request metrics
+export const httpRequestsTotal = new Counter({
+  name: 'http_requests_total',
+  help: 'Total number of HTTP requests',
+  labelNames: ['method', 'path', 'status'],
+  registers: [register],
+});
 
-  // Gauges
-  public activeRequests: Gauge;
-  public clusterNodes: Gauge;
-  public healthyNodes: Gauge;
-  public modelLoaded: Gauge;
+export const httpRequestDuration = new Histogram({
+  name: 'http_request_duration_seconds',
+  help: 'Duration of HTTP requests in seconds',
+  labelNames: ['method', 'path', 'status'],
+  buckets: [0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10],
+  registers: [register],
+});
 
-  constructor(nodeType: 'controller' | 'worker') {
-    this.registry = new Registry();
+// Inference metrics
+export const inferenceRequestsTotal = new Counter({
+  name: 'inference_requests_total',
+  help: 'Total number of inference requests',
+  labelNames: ['model', 'status'],
+  registers: [register],
+});
 
-    // Default labels for all metrics
-    this.registry.setDefaultLabels({
-      app: 'ai-cluster',
-      nodeType,
-    });
+export const inferenceTokensGenerated = new Counter({
+  name: 'inference_tokens_generated_total',
+  help: 'Total number of tokens generated',
+  labelNames: ['model'],
+  registers: [register],
+});
 
-    // Initialize counters
-    this.requestsTotal = new Counter({
-      name: 'http_requests_total',
-      help: 'Total number of HTTP requests',
-      labelNames: ['method', 'path', 'status'],
-      registers: [this.registry],
-    });
+export const inferenceDuration = new Histogram({
+  name: 'inference_duration_seconds',
+  help: 'Duration of inference requests in seconds',
+  labelNames: ['model'],
+  buckets: [0.1, 0.5, 1, 2, 5, 10, 30, 60],
+  registers: [register],
+});
 
-    this.inferenceRequestsTotal = new Counter({
-      name: 'inference_requests_total',
-      help: 'Total number of inference requests',
-      labelNames: ['model', 'status'],
-      registers: [this.registry],
-    });
+export const inferenceTokensPerSecond = new Gauge({
+  name: 'inference_tokens_per_second',
+  help: 'Current tokens per second generation rate',
+  labelNames: ['model'],
+  registers: [register],
+});
 
-    this.errorsTotal = new Counter({
-      name: 'errors_total',
-      help: 'Total number of errors',
-      labelNames: ['type'],
-      registers: [this.registry],
-    });
+// Cluster metrics
+export const clusterNodesActive = new Gauge({
+  name: 'cluster_nodes_active',
+  help: 'Number of active nodes in cluster',
+  labelNames: ['type'],
+  registers: [register],
+});
 
-    this.tokensGenerated = new Counter({
-      name: 'tokens_generated_total',
-      help: 'Total number of tokens generated',
-      labelNames: ['model'],
-      registers: [this.registry],
-    });
+export const clusterNodeRequestsActive = new Gauge({
+  name: 'cluster_node_requests_active',
+  help: 'Number of active requests per node',
+  labelNames: ['node_id'],
+  registers: [register],
+});
 
-    // Initialize histograms
-    this.requestDuration = new Histogram({
-      name: 'http_request_duration_seconds',
-      help: 'HTTP request duration in seconds',
-      labelNames: ['method', 'path', 'status'],
-      buckets: [0.1, 0.5, 1, 2, 5, 10, 30],
-      registers: [this.registry],
-    });
+// Model metrics
+export const modelLoadTime = new Histogram({
+  name: 'model_load_time_seconds',
+  help: 'Time taken to load model',
+  labelNames: ['model'],
+  buckets: [1, 5, 10, 30, 60, 120],
+  registers: [register],
+});
 
-    this.inferenceDuration = new Histogram({
-      name: 'inference_duration_seconds',
-      help: 'Inference request duration in seconds',
-      labelNames: ['model'],
-      buckets: [0.5, 1, 2, 5, 10, 30, 60, 120],
-      registers: [this.registry],
-    });
+export const modelMemoryUsage = new Gauge({
+  name: 'model_memory_usage_bytes',
+  help: 'Memory used by loaded model',
+  labelNames: ['model'],
+  registers: [register],
+});
 
-    this.tokenGenerationTime = new Histogram({
-      name: 'token_generation_time_seconds',
-      help: 'Time to generate each token',
-      labelNames: ['model'],
-      buckets: [0.01, 0.05, 0.1, 0.2, 0.5, 1],
-      registers: [this.registry],
-    });
+// Rate limit metrics
+export const rateLimitExceeded = new Counter({
+  name: 'rate_limit_exceeded_total',
+  help: 'Total number of rate limit exceeded events',
+  labelNames: ['api_key_preview', 'limit_type'],
+  registers: [register],
+});
 
-    // Initialize gauges
-    this.activeRequests = new Gauge({
-      name: 'active_requests',
-      help: 'Number of active requests',
-      registers: [this.registry],
-    });
+// Authentication metrics
+export const authAttempts = new Counter({
+  name: 'auth_attempts_total',
+  help: 'Total number of authentication attempts',
+  labelNames: ['status'],
+  registers: [register],
+});
 
-    this.clusterNodes = new Gauge({
-      name: 'cluster_nodes_total',
-      help: 'Total number of nodes in cluster',
-      labelNames: ['type'],
-      registers: [this.registry],
-    });
+// Export registry for /metrics endpoint
+export { register };
 
-    this.healthyNodes = new Gauge({
-      name: 'cluster_nodes_healthy',
-      help: 'Number of healthy nodes in cluster',
-      registers: [this.registry],
-    });
+// Helper function to record HTTP request
+export function recordHttpRequest(method: string, path: string, status: number, duration: number) {
+  httpRequestsTotal.inc({ method, path, status });
+  httpRequestDuration.observe({ method, path, status }, duration);
+}
 
-    this.modelLoaded = new Gauge({
-      name: 'model_loaded',
-      help: 'Whether model is loaded (1) or not (0)',
-      registers: [this.registry],
-    });
-  }
-
-  // Middleware to track HTTP requests
-  requestMiddleware() {
-    return (req: Request, res: Response, next: any) => {
-      const start = Date.now();
-      this.activeRequests.inc();
-
-      res.on('finish', () => {
-        const duration = (Date.now() - start) / 1000;
-        const labels = {
-          method: req.method,
-          path: req.route?.path || req.path,
-          status: res.statusCode.toString(),
-        };
-
-        this.requestsTotal.inc(labels);
-        this.requestDuration.observe(labels, duration);
-        this.activeRequests.dec();
-      });
-
-      next();
-    };
-  }
-
-  // Record inference metrics
-  recordInference({
-    model,
-    duration,
-    tokens,
-    success,
-  }: {
-    model: string;
-    duration: number;
-    tokens: { prompt: number; completion: number };
-    success: boolean;
-  }) {
-    this.inferenceRequestsTotal.inc({
-      model,
-      status: success ? 'success' : 'error',
-    });
-
-    if (success) {
-      this.inferenceDuration.observe({ model }, duration / 1000);
-      this.tokensGenerated.inc({ model }, tokens.completion);
-
-      if (tokens.completion > 0) {
-        const timePerToken = duration / tokens.completion / 1000;
-        this.tokenGenerationTime.observe({ model }, timePerToken);
-      }
-    }
-  }
-
-  // Update cluster metrics
-  updateClusterMetrics(totalNodes: number, healthyNodes: number) {
-    this.clusterNodes.set({ type: 'total' }, totalNodes);
-    this.healthyNodes.set(healthyNodes);
-  }
-
-  // Get metrics endpoint handler
-  metricsHandler() {
-    return async (req: Request, res: Response) => {
-      res.set('Content-Type', this.registry.contentType);
-      res.end(await this.registry.metrics());
-    };
+// Helper function to record inference
+export function recordInference(
+  model: string,
+  status: 'success' | 'error',
+  duration: number,
+  tokens: number,
+  tokensPerSecond: number
+) {
+  inferenceRequestsTotal.inc({ model, status });
+  inferenceDuration.observe({ model }, duration);
+  
+  if (status === 'success') {
+    inferenceTokensGenerated.inc({ model }, tokens);
+    inferenceTokensPerSecond.set({ model }, tokensPerSecond);
   }
 }
