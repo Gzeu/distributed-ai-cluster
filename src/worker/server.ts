@@ -4,7 +4,9 @@ import axios from 'axios';
 import os from 'os';
 import { NodeInfo, InferenceRequest, InferenceResponse } from '../types';
 import { ModelEngine } from './model-engine';
-import { StreamingEngine } from './streaming-engine';
+import { logger, createRequestLogger, logPerformance } from '../utils/logger';
+import { metricsMiddleware, metricsEndpoint } from '../metrics/middleware';
+import { modelLoadTime, modelMemoryUsage, clusterNodeRequestsActive, recordInference } from '../metrics/prometheus';
 
 config();
 
@@ -14,10 +16,11 @@ const CONTROLLER_URL = process.env.CONTROLLER_URL || 'http://localhost:8080';
 
 // Middleware
 app.use(express.json());
+app.use(createRequestLogger());
+app.use(metricsMiddleware);
 
 // Initialize model engine
 const modelEngine = new ModelEngine();
-let streamingEngine: StreamingEngine;
 let nodeId: string;
 let registrationInterval: NodeJS.Timeout;
 
@@ -59,7 +62,7 @@ async function registerWithController() {
       port: PORT,
       status: 'healthy',
       capabilities: {
-        gpuAvailable: false,
+        gpuAvailable: false, // TODO: Detect GPU
         gpuMemory: 0,
         cpuCores: os.cpus().length,
         ramTotal: os.totalmem(),
@@ -72,9 +75,9 @@ async function registerWithController() {
     };
 
     await axios.post(`${CONTROLLER_URL}/cluster/register`, nodeInfo);
-    console.log(`✅ Registered with controller: ${nodeId}`);
+    logger.debug('Heartbeat sent to controller', { nodeId });
   } catch (error: any) {
-    console.error(`❌ Failed to register with controller: ${error.message}`);
+    logger.error('Failed to register with controller', { error: error.message });
   }
 }
 
@@ -82,25 +85,48 @@ async function registerWithController() {
 
 // Health check
 app.get('/health', (req: Request, res: Response) => {
+  const metrics = getSystemMetrics();
+  
+  // Update Prometheus metrics
+  clusterNodeRequestsActive.set({ node_id: nodeId }, metrics.activeRequests);
+  
   res.json({
     status: 'healthy',
     nodeId,
-    metrics: getSystemMetrics(),
+    metrics,
     timestamp: Date.now(),
   });
 });
 
-// Standard inference endpoint
+// Prometheus metrics
+app.get('/metrics', metricsEndpoint);
+
+// Inference endpoint
 app.post('/inference', async (req: Request, res: Response) => {
+  const startTime = Date.now();
+  
   try {
     const request: InferenceRequest = req.body;
-    console.log(`🔄 Processing inference request: ${request.id}`);
+    logger.info('Processing inference request', {
+      requestId: request.id,
+      model: request.model,
+      messageCount: request.messages.length,
+    });
 
-    const startTime = Date.now();
     const result = await modelEngine.processInference(request);
-    const duration = Date.now() - startTime;
+    const duration = (Date.now() - startTime) / 1000;
 
-    console.log(`✅ Inference completed in ${duration}ms`);
+    // Record metrics
+    const tokensPerSecond = result.completionTokens / duration;
+    recordInference(request.model, 'success', duration, result.completionTokens, tokensPerSecond);
+
+    logger.info('Inference completed', {
+      requestId: request.id,
+      duration,
+      promptTokens: result.promptTokens,
+      completionTokens: result.completionTokens,
+      tokensPerSecond: tokensPerSecond.toFixed(2),
+    });
 
     const response: InferenceResponse = {
       id: request.id,
@@ -125,7 +151,15 @@ app.post('/inference', async (req: Request, res: Response) => {
 
     res.json(response);
   } catch (error: any) {
-    console.error('❌ Inference error:', error.message);
+    const duration = (Date.now() - startTime) / 1000;
+    recordInference(req.body.model || 'default', 'error', duration, 0, 0);
+    
+    logger.error('Inference error', {
+      requestId: req.body.id,
+      error: error.message,
+      stack: error.stack,
+    });
+    
     res.status(500).json({
       error: 'Inference failed',
       message: error.message,
@@ -133,103 +167,43 @@ app.post('/inference', async (req: Request, res: Response) => {
   }
 });
 
-// Streaming inference endpoint
-app.post('/inference/stream', async (req: Request, res: Response) => {
-  try {
-    const request: InferenceRequest = req.body;
-    console.log(`🌊 Processing streaming request: ${request.id}`);
-
-    // Set SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-
-    await streamingEngine.processStreamingInference(request, {
-      onToken: (token: string) => {
-        const chunk = {
-          id: request.id,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: request.model,
-          choices: [
-            {
-              index: 0,
-              delta: { content: token },
-              finish_reason: null,
-            },
-          ],
-        };
-        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-      },
-      onComplete: (fullText: string) => {
-        const finalChunk = {
-          id: request.id,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: request.model,
-          choices: [
-            {
-              index: 0,
-              delta: {},
-              finish_reason: 'stop',
-            },
-          ],
-        };
-        res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
-        res.write('data: [DONE]\n\n');
-        res.end();
-        console.log(`✅ Streaming completed: ${fullText.length} chars`);
-      },
-      onError: (error: Error) => {
-        const errorChunk = {
-          error: {
-            message: error.message,
-            type: 'server_error',
-          },
-        };
-        res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
-        res.end();
-        console.error('❌ Streaming error:', error.message);
-      },
-    });
-  } catch (error: any) {
-    console.error('❌ Streaming error:', error.message);
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: 'Streaming failed',
-        message: error.message,
-      });
-    }
-  }
-});
-
 // Initialize
 async function initialize() {
   nodeId = generateNodeId();
-  console.log(`🚀 Worker Node: ${nodeId}`);
-  console.log(`📡 Controller URL: ${CONTROLLER_URL}`);
+  logger.info('Worker node initializing', { nodeId });
 
   // Load model
   const modelPath = process.env.MODEL_PATH;
   if (modelPath) {
     try {
+      const loadStart = Date.now();
       await modelEngine.loadModel(modelPath);
-      console.log(`✅ Model loaded: ${modelPath}`);
+      const loadDuration = (Date.now() - loadStart) / 1000;
+      
+      // Record model load time
+      modelLoadTime.observe({ model: modelPath }, loadDuration);
+      
+      logger.info('Model loaded successfully', {
+        modelPath,
+        loadTime: `${loadDuration.toFixed(2)}s`,
+      });
     } catch (error: any) {
-      console.warn(`⚠️ Failed to load model: ${error.message}`);
-      console.warn('⚠️ Worker will run in demo mode');
+      logger.warn('Failed to load model, running in demo mode', {
+        error: error.message,
+        modelPath,
+      });
     }
   } else {
-    console.warn('⚠️ No MODEL_PATH specified, running in demo mode');
+    logger.warn('No MODEL_PATH specified, running in demo mode');
   }
-
-  // Initialize streaming engine
-  streamingEngine = new StreamingEngine(modelEngine['llamaEngine'] || null);
 
   // Start server
   app.listen(PORT, () => {
-    console.log(`✅ Worker listening on port ${PORT}`);
+    logger.info('Worker node started', {
+      port: PORT,
+      controllerUrl: CONTROLLER_URL,
+      metricsUrl: `http://localhost:${PORT}/metrics`,
+    });
   });
 
   // Register with controller
@@ -241,7 +215,7 @@ async function initialize() {
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('📴 Shutting down gracefully...');
+  logger.info('Shutting down gracefully');
   clearInterval(registrationInterval);
   process.exit(0);
 });
