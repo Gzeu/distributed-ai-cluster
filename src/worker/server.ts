@@ -4,9 +4,13 @@ import axios from 'axios';
 import os from 'os';
 import { NodeInfo, InferenceRequest, InferenceResponse } from '../types';
 import { ModelEngine } from './model-engine';
-import { logger, createRequestLogger, logPerformance } from '../utils/logger';
+import { logger, createRequestLogger } from '../utils/logger';
 import { metricsMiddleware, metricsEndpoint } from '../metrics/middleware';
-import { modelLoadTime, modelMemoryUsage, clusterNodeRequestsActive, recordInference } from '../metrics/prometheus';
+import { 
+  modelLoadTime, 
+  clusterNodeRequestsActive, 
+  recordInference 
+} from '../metrics/prometheus';
 
 config();
 
@@ -62,7 +66,7 @@ async function registerWithController() {
       port: PORT,
       status: 'healthy',
       capabilities: {
-        gpuAvailable: false, // TODO: Detect GPU
+        gpuAvailable: false,
         gpuMemory: 0,
         cpuCores: os.cpus().length,
         ramTotal: os.totalmem(),
@@ -77,7 +81,9 @@ async function registerWithController() {
     await axios.post(`${CONTROLLER_URL}/cluster/register`, nodeInfo);
     logger.debug('Heartbeat sent to controller', { nodeId });
   } catch (error: any) {
-    logger.error('Failed to register with controller', { error: error.message });
+    logger.error('Failed to register with controller', { 
+      error: error.message 
+    });
   }
 }
 
@@ -118,7 +124,13 @@ app.post('/inference', async (req: Request, res: Response) => {
 
     // Record metrics
     const tokensPerSecond = result.completionTokens / duration;
-    recordInference(request.model, 'success', duration, result.completionTokens, tokensPerSecond);
+    recordInference(
+      request.model, 
+      'success', 
+      duration, 
+      result.completionTokens, 
+      tokensPerSecond
+    );
 
     logger.info('Inference completed', {
       requestId: request.id,

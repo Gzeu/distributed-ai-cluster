@@ -23,8 +23,8 @@ app.use(helmet());
 app.use(cors());
 app.use(compression());
 app.use(express.json());
-app.use(createRequestLogger()); // Structured logging
-app.use(metricsMiddleware); // Prometheus metrics
+app.use(createRequestLogger());
+app.use(metricsMiddleware);
 
 // Initialize cluster components
 const clusterManager = new ClusterManager();
@@ -71,7 +71,11 @@ app.post('/cluster/register', (req: Request, res: Response) => {
   try {
     const nodeInfo = req.body;
     clusterManager.registerNode(nodeInfo);
-    logger.info('Worker registered', { nodeId: nodeInfo.id, host: nodeInfo.host, port: nodeInfo.port });
+    logger.info('Worker registered', { 
+      nodeId: nodeInfo.id, 
+      host: nodeInfo.host, 
+      port: nodeInfo.port 
+    });
     res.json({ success: true, nodeId: nodeInfo.id });
   } catch (error: any) {
     logger.error('Registration failed', { error: error.message });
