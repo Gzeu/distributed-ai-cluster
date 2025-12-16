@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 255, 255, 255;
+  --background-start-rgb: 17, 24, 39;
+  --background-end-rgb: 0, 0, 0;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    rgb(var(--background-end-rgb))
+  ) rgb(var(--background-start-rgb));
+}
+
+.card {
+  @apply bg-gray-800 bg-opacity-50 backdrop-blur-lg rounded-lg border border-gray-700 shadow-xl;
+}
+
+.stat-card {
+  @apply card p-6 hover:border-primary transition-all duration-200;
+}
+
+.node-card {
+  @apply card p-4 hover:scale-105 transition-transform duration-200;
+}
