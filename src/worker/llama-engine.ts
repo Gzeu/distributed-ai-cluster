@@ -58,12 +58,16 @@ export class LlamaEngine {
       };
 
       this.model = await LlamaModel.load(modelOptions);
+
       this.context = await this.model.createContext({
         contextSize: this.config.contextSize,
         batchSize: this.config.batchSize,
         threads: this.config.threads,
       });
-      this.session = new LlamaChatSession({ context: this.context });
+
+      this.session = new LlamaChatSession({
+        context: this.context,
+      });
 
       this.isLoaded = true;
       const loadTime = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -78,7 +82,13 @@ export class LlamaEngine {
     }
   }
 
-  async processInference(request: InferenceRequest): Promise<InferenceResult> {
+  /**
+   * Process inference with streaming support
+   */
+  async processInference(
+    request: InferenceRequest,
+    onToken?: (token: string) => void
+  ): Promise<InferenceResult> {
     if (!this.isLoaded || !this.session) {
       throw new Error('Model not loaded. Call loadModel() first.');
     }
@@ -94,6 +104,7 @@ export class LlamaEngine {
       console.log(`🔄 Processing inference request ${request.id}`);
       console.log(`   Prompt length: ${prompt.length} chars`);
 
+      // Generate response with streaming callback
       const response = await this.session.prompt(prompt, {
         maxTokens: request.maxTokens || 500,
         temperature: request.temperature || 0.7,
@@ -102,6 +113,12 @@ export class LlamaEngine {
           penalty: (request.frequencyPenalty || 0) + 1,
           presencePenalty: request.presencePenalty || 0,
         },
+        onToken: onToken ? (tokens) => {
+          // Call the streaming callback with each token
+          if (onToken) {
+            onToken(tokens.join(''));
+          }
+        } : undefined,
       });
 
       const responseTime = Date.now() - startTime;
@@ -127,33 +144,9 @@ export class LlamaEngine {
     }
   }
 
-  // NEW: Streaming support
-  async streamPrompt(
-    prompt: string,
-    options: {
-      maxTokens?: number;
-      temperature?: number;
-      topP?: number;
-      onToken: (token: string) => void;
-    }
-  ): Promise<void> {
-    if (!this.isLoaded || !this.session) {
-      throw new Error('Model not loaded');
-    }
-
-    await this.session.prompt(prompt, {
-      maxTokens: options.maxTokens || 500,
-      temperature: options.temperature || 0.7,
-      topP: options.topP || 0.95,
-      onToken: (tokens) => {
-        // Call callback for each token
-        options.onToken(tokens.join(''));
-      },
-    });
-  }
-
   private formatMessages(messages: Array<{ role: string; content: string }>): string {
     let prompt = '';
+
     for (const message of messages) {
       if (message.role === 'system') {
         prompt += `### System:\n${message.content}\n\n`;
@@ -163,6 +156,7 @@ export class LlamaEngine {
         prompt += `### Assistant:\n${message.content}\n\n`;
       }
     }
+
     prompt += '### Assistant:\n';
     return prompt;
   }
@@ -199,15 +193,20 @@ export class LlamaEngine {
   }
 
   async unload(): Promise<void> {
-    if (this.session) this.session = null;
+    if (this.session) {
+      this.session = null;
+    }
+
     if (this.context) {
       await this.context.dispose();
       this.context = null;
     }
+
     if (this.model) {
       await this.model.dispose();
       this.model = null;
     }
+
     this.isLoaded = false;
     console.log('🗑️  Model unloaded');
   }
