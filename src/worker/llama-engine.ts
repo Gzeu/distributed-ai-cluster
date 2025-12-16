@@ -52,31 +52,23 @@ export class LlamaEngine {
     const startTime = Date.now();
 
     try {
-      // Load model with configuration
       const modelOptions: LlamaModelOptions = {
         modelPath: this.config.modelPath,
         gpuLayers: this.config.gpuLayers,
       };
 
       this.model = await LlamaModel.load(modelOptions);
-
-      // Create context
       this.context = await this.model.createContext({
         contextSize: this.config.contextSize,
         batchSize: this.config.batchSize,
         threads: this.config.threads,
       });
-
-      // Create chat session
-      this.session = new LlamaChatSession({
-        context: this.context,
-      });
+      this.session = new LlamaChatSession({ context: this.context });
 
       this.isLoaded = true;
       const loadTime = ((Date.now() - startTime) / 1000).toFixed(2);
       console.log(`✅ Model loaded successfully in ${loadTime}s`);
 
-      // Log model info
       const stats = await this.getModelInfo();
       console.log(`   Model size: ${stats.modelSize}`);
       console.log(`   Architecture: ${stats.architecture}`);
@@ -97,13 +89,11 @@ export class LlamaEngine {
     const startTime = Date.now();
 
     try {
-      // Format messages into prompt
       const prompt = this.formatMessages(request.messages);
       
       console.log(`🔄 Processing inference request ${request.id}`);
       console.log(`   Prompt length: ${prompt.length} chars`);
 
-      // Generate response
       const response = await this.session.prompt(prompt, {
         maxTokens: request.maxTokens || 500,
         temperature: request.temperature || 0.7,
@@ -112,16 +102,11 @@ export class LlamaEngine {
           penalty: (request.frequencyPenalty || 0) + 1,
           presencePenalty: request.presencePenalty || 0,
         },
-        onToken: (tokens) => {
-          // Real-time token streaming (can be used for SSE later)
-          // console.log('Token:', tokens);
-        },
       });
 
       const responseTime = Date.now() - startTime;
       this.totalResponseTime += responseTime;
 
-      // Count tokens (approximate)
       const promptTokens = Math.floor(prompt.length / 4);
       const completionTokens = Math.floor(response.length / 4);
       this.totalTokens += completionTokens;
@@ -142,10 +127,33 @@ export class LlamaEngine {
     }
   }
 
-  private formatMessages(messages: Array<{ role: string; content: string }>): string {
-    // Format messages in ChatML or Alpaca format depending on model
-    let prompt = '';
+  // NEW: Streaming support
+  async streamPrompt(
+    prompt: string,
+    options: {
+      maxTokens?: number;
+      temperature?: number;
+      topP?: number;
+      onToken: (token: string) => void;
+    }
+  ): Promise<void> {
+    if (!this.isLoaded || !this.session) {
+      throw new Error('Model not loaded');
+    }
 
+    await this.session.prompt(prompt, {
+      maxTokens: options.maxTokens || 500,
+      temperature: options.temperature || 0.7,
+      topP: options.topP || 0.95,
+      onToken: (tokens) => {
+        // Call callback for each token
+        options.onToken(tokens.join(''));
+      },
+    });
+  }
+
+  private formatMessages(messages: Array<{ role: string; content: string }>): string {
+    let prompt = '';
     for (const message of messages) {
       if (message.role === 'system') {
         prompt += `### System:\n${message.content}\n\n`;
@@ -155,7 +163,6 @@ export class LlamaEngine {
         prompt += `### Assistant:\n${message.content}\n\n`;
       }
     }
-
     prompt += '### Assistant:\n';
     return prompt;
   }
@@ -192,23 +199,15 @@ export class LlamaEngine {
   }
 
   async unload(): Promise<void> {
-    if (this.session) {
-      // Cleanup session
-      this.session = null;
-    }
-
+    if (this.session) this.session = null;
     if (this.context) {
-      // Cleanup context
       await this.context.dispose();
       this.context = null;
     }
-
     if (this.model) {
-      // Cleanup model
       await this.model.dispose();
       this.model = null;
     }
-
     this.isLoaded = false;
     console.log('🗑️  Model unloaded');
   }
