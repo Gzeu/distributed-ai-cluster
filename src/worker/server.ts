@@ -4,6 +4,7 @@ import axios from 'axios';
 import os from 'os';
 import { NodeInfo, InferenceRequest, InferenceResponse } from '../types';
 import { ModelEngine } from './model-engine';
+import { StreamingEngine } from './streaming-engine';
 
 config();
 
@@ -16,6 +17,7 @@ app.use(express.json());
 
 // Initialize model engine
 const modelEngine = new ModelEngine();
+let streamingEngine: StreamingEngine;
 let nodeId: string;
 let registrationInterval: NodeJS.Timeout;
 
@@ -57,7 +59,7 @@ async function registerWithController() {
       port: PORT,
       status: 'healthy',
       capabilities: {
-        gpuAvailable: false, // TODO: Detect GPU
+        gpuAvailable: false,
         gpuMemory: 0,
         cpuCores: os.cpus().length,
         ramTotal: os.totalmem(),
@@ -88,7 +90,7 @@ app.get('/health', (req: Request, res: Response) => {
   });
 });
 
-// Inference endpoint
+// Standard inference endpoint
 app.post('/inference', async (req: Request, res: Response) => {
   try {
     const request: InferenceRequest = req.body;
@@ -131,6 +133,77 @@ app.post('/inference', async (req: Request, res: Response) => {
   }
 });
 
+// Streaming inference endpoint
+app.post('/inference/stream', async (req: Request, res: Response) => {
+  try {
+    const request: InferenceRequest = req.body;
+    console.log(`🌊 Processing streaming request: ${request.id}`);
+
+    // Set SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    await streamingEngine.processStreamingInference(request, {
+      onToken: (token: string) => {
+        const chunk = {
+          id: request.id,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: request.model,
+          choices: [
+            {
+              index: 0,
+              delta: { content: token },
+              finish_reason: null,
+            },
+          ],
+        };
+        res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      },
+      onComplete: (fullText: string) => {
+        const finalChunk = {
+          id: request.id,
+          object: 'chat.completion.chunk',
+          created: Math.floor(Date.now() / 1000),
+          model: request.model,
+          choices: [
+            {
+              index: 0,
+              delta: {},
+              finish_reason: 'stop',
+            },
+          ],
+        };
+        res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        console.log(`✅ Streaming completed: ${fullText.length} chars`);
+      },
+      onError: (error: Error) => {
+        const errorChunk = {
+          error: {
+            message: error.message,
+            type: 'server_error',
+          },
+        };
+        res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
+        res.end();
+        console.error('❌ Streaming error:', error.message);
+      },
+    });
+  } catch (error: any) {
+    console.error('❌ Streaming error:', error.message);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'Streaming failed',
+        message: error.message,
+      });
+    }
+  }
+});
+
 // Initialize
 async function initialize() {
   nodeId = generateNodeId();
@@ -150,6 +223,9 @@ async function initialize() {
   } else {
     console.warn('⚠️ No MODEL_PATH specified, running in demo mode');
   }
+
+  // Initialize streaming engine
+  streamingEngine = new StreamingEngine(modelEngine['llamaEngine'] || null);
 
   // Start server
   app.listen(PORT, () => {

@@ -1,94 +1,90 @@
-import { Response } from 'express';
 import { LlamaEngine } from './llama-engine';
 import { InferenceRequest } from '../types';
 
+export interface StreamingCallback {
+  onToken: (token: string) => void;
+  onComplete: (fullText: string) => void;
+  onError: (error: Error) => void;
+}
+
 export class StreamingEngine {
-  constructor(private llamaEngine: LlamaEngine) {}
+  private llamaEngine: LlamaEngine | null = null;
 
-  async streamInference(
-    res: Response,
-    request: InferenceRequest
+  constructor(llamaEngine: LlamaEngine | null) {
+    this.llamaEngine = llamaEngine;
+  }
+
+  async processStreamingInference(
+    request: InferenceRequest,
+    callbacks: StreamingCallback
   ): Promise<void> {
-    // Set SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders();
-
-    const requestId = request.id;
-    const model = request.model;
-    let isFirst = true;
-    let tokenCount = 0;
+    if (!this.llamaEngine) {
+      // Demo mode streaming
+      await this.demoStreaming(request, callbacks);
+      return;
+    }
 
     try {
-      // Format prompt
       const prompt = this.formatMessages(request.messages);
+      let fullText = '';
+      let tokenBuffer = '';
 
-      // Stream tokens from LlamaEngine
-      await this.llamaEngine.streamPrompt(
-        prompt,
-        {
-          maxTokens: request.maxTokens || 500,
-          temperature: request.temperature || 0.7,
-          topP: request.topP || 0.95,
-          onToken: (token: string) => {
-            tokenCount++;
-            
-            const chunk = {
-              id: requestId,
-              object: 'chat.completion.chunk',
-              created: Math.floor(Date.now() / 1000),
-              model,
-              choices: [
-                {
-                  index: 0,
-                  delta: isFirst
-                    ? { role: 'assistant', content: token }
-                    : { content: token },
-                  finish_reason: null,
-                },
-              ],
-            };
-
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            isFirst = false;
-          },
-        }
-      );
-
-      // Send final chunk
-      const finalChunk = {
-        id: requestId,
-        object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000),
-        model,
-        choices: [
-          {
-            index: 0,
-            delta: {},
-            finish_reason: 'stop',
-          },
-        ],
-      };
-
-      res.write(`data: ${JSON.stringify(finalChunk)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-
-      console.log(`✅ Streaming completed: ${tokenCount} tokens`);
-    } catch (error: any) {
-      console.error('❌ Streaming error:', error.message);
+      // Use llama.cpp streaming
+      const session = await this.llamaEngine.getSession();
       
-      const errorChunk = {
-        error: {
-          message: error.message,
-          type: 'server_error',
+      if (!session) {
+        throw new Error('No active session');
+      }
+
+      await session.prompt(prompt, {
+        maxTokens: request.maxTokens || 500,
+        temperature: request.temperature || 0.7,
+        topP: request.topP || 0.95,
+        onToken: (tokens: number[]) => {
+          // Convert token IDs to text
+          const text = this.tokensToText(tokens);
+          tokenBuffer += text;
+
+          // Send when we have a word boundary
+          if (tokenBuffer.includes(' ') || tokenBuffer.includes('\n')) {
+            callbacks.onToken(tokenBuffer);
+            fullText += tokenBuffer;
+            tokenBuffer = '';
+          }
         },
-      };
-      
-      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
-      res.end();
+      });
+
+      // Send any remaining tokens
+      if (tokenBuffer) {
+        callbacks.onToken(tokenBuffer);
+        fullText += tokenBuffer;
+      }
+
+      callbacks.onComplete(fullText);
+    } catch (error: any) {
+      callbacks.onError(error);
     }
+  }
+
+  private async demoStreaming(
+    request: InferenceRequest,
+    callbacks: StreamingCallback
+  ): Promise<void> {
+    const fullResponse = `This is a demo streaming response. In production, this would be generated token by token from the actual LLM model. The request was: "${request.messages[request.messages.length - 1]?.content}". Each word appears gradually to simulate real-time generation.`;
+
+    const words = fullResponse.split(' ');
+    let fullText = '';
+
+    for (let i = 0; i < words.length; i++) {
+      const word = words[i] + (i < words.length - 1 ? ' ' : '');
+      fullText += word;
+      callbacks.onToken(word);
+
+      // Simulate token generation delay
+      await new Promise(resolve => setTimeout(resolve, 50 + Math.random() * 100));
+    }
+
+    callbacks.onComplete(fullText);
   }
 
   private formatMessages(messages: Array<{ role: string; content: string }>): string {
@@ -104,5 +100,11 @@ export class StreamingEngine {
     }
     prompt += '### Assistant:\n';
     return prompt;
+  }
+
+  private tokensToText(tokens: number[]): string {
+    // This would use the model's tokenizer
+    // For now, placeholder implementation
+    return tokens.map(t => String.fromCharCode(t)).join('');
   }
 }
